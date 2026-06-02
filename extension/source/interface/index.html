@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Packet Tracer MCP</title>
+  <title>Packet Tracer MCP 桥接</title>
   <script src="socket.io.min.js"></script>
   <style>
     :root {
@@ -117,25 +117,25 @@
 <body>
   <header class="header">
     <h1>Cisco Packet Tracer MCP</h1>
-    <span class="status-pill"><span id="status-dot" class="dot connecting"></span><span id="status-text">connecting</span></span>
+    <span class="status-pill"><span id="status-dot" class="dot connecting"></span><span id="status-text">连接中</span></span>
   </header>
 
   <main class="body">
     <section class="card">
-      <h2>Bridge</h2>
-      <div class="row"><span class="k">Endpoint</span><span class="v" id="endpoint">http://127.0.0.1:7531</span></div>
+      <h2>桥接状态</h2>
+      <div class="row"><span class="k">服务地址</span><span class="v" id="endpoint">http://127.0.0.1:7531</span></div>
       <div class="row"><span class="k">Socket ID</span><span class="v" id="sid">—</span></div>
-      <div class="row"><span class="k">Tools handled</span><span class="v" id="tool-count">0</span></div>
+      <div class="row"><span class="k">已处理工具调用</span><span class="v" id="tool-count">0</span></div>
     </section>
 
     <section class="card" style="flex:1; display:flex; flex-direction:column; min-height:0;">
-      <h2>Activity</h2>
+      <h2>活动日志</h2>
       <div id="log" class="log"></div>
     </section>
   </main>
 
   <footer class="footer">
-    <span>PT-side bridge — the MCP server runs externally.</span>
+    <span>此页面是 PT 侧桥接，MCP 服务端运行在外部进程。</span>
   </footer>
 
   <script src="interface.js"></script>

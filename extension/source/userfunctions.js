@@ -193,20 +193,75 @@ configureIosDevice = function (deviceName, commands) {
 
     device.skipBoot();
     var commandsArray = commands.split("\n");
-    device.enterCommand("!", "global");
+    var commandResults = [];
+    var failed = [];
+
+    function parseCommandStatus(result) {
+      // PT pair<CommandStatus, string> can be exposed differently by runtime.
+      if (result === undefined || result === null) {
+        return { status: 0, message: "" };
+      }
+      if (Array.isArray(result)) {
+        var stA = Number(result[0]);
+        return { status: isNaN(stA) ? 0 : stA, message: String(result[1] || "") };
+      }
+      if (typeof result === "object") {
+        if ("first" in result || "second" in result) {
+          var stF = Number(result.first);
+          return { status: isNaN(stF) ? 0 : stF, message: String(result.second || "") };
+        }
+        if ("status" in result || "message" in result) {
+          var stS = Number(result.status);
+          return { status: isNaN(stS) ? 0 : stS, message: String(result.message || "") };
+        }
+      }
+      return { status: 0, message: String(result) };
+    }
+
+    // Ensure we are in config context before applying multiline commands.
+    parseCommandStatus(device.enterCommand("enable", "user"));
+    parseCommandStatus(device.enterCommand("configure terminal", "enable"));
 
     for (var c = 0; c < commandsArray.length; c++) {
       var command = commandsArray[c];
       if (command.trim()) {
-        device.enterCommand(command, "");
+        var raw = device.enterCommand(command, "");
+        var parsed = parseCommandStatus(raw);
+        commandResults.push({
+          command: command,
+          status: parsed.status,
+          message: parsed.message,
+        });
+        if (parsed.status !== 0) {
+          failed.push({
+            command: command,
+            status: parsed.status,
+            message: parsed.message,
+          });
+        }
       }
     }
 
-    device.enterCommand("write memory", "enable");
+    parseCommandStatus(device.enterCommand("end", ""));
+    parseCommandStatus(device.enterCommand("write memory", "enable"));
+
+    if (failed.length > 0) {
+      var firstFail = failed[0];
+      return {
+        success: false,
+        error:
+          "IOS command failed on " + deviceName +
+          " (status=" + firstFail.status + "): " + firstFail.command +
+          (firstFail.message ? " -> " + firstFail.message : ""),
+        failedCommands: failed,
+        commandResults: commandResults,
+      };
+    }
 
     return {
       success: true,
-      message: `Configuration applied to ${deviceName} (${commandsArray.length} commands)`,
+      message: `Configuration applied to ${deviceName} (${commandResults.length} commands)`,
+      commandResults: commandResults,
     };
   } catch (error) {
     return fail("Error configuring IOS device", error);
@@ -218,33 +273,58 @@ getNetwork = function () {
     var deviceCount = ipc.network().getDeviceCount();
     var devices = [];
     var connections = [];
+    var portOwnerByRef = [];
+    var portOwnerByName = {};
+    var seenConnectionSet = {};
 
-    // Pass 1: collect (deviceName, portName) -> in_use using link table
-    var inUseSet = {};
-    var linkCount = ipc.network().getLinkCount();
-    for (var li = 0; li < linkCount; li++) {
-      var link = ipc.network().getLinkAt(li);
-      var p1 = link.getPort1();
-      var p2 = link.getPort2();
-      if (p1) inUseSet[p1.getName()] = true;
-      if (p2) inUseSet[p2.getName()] = true;
+    function makeEndpointKey(deviceName, portName) {
+      return deviceName + "::" + portName;
     }
 
-    // Pass 2: devices + interfaces, and a portName -> deviceName map for Pass 3.
-    var portOwner = {};
+    function rememberPortOwner(portObj, deviceName, portName) {
+      portOwnerByRef.push({
+        port: portObj,
+        deviceName: deviceName,
+        portName: portName,
+      });
+    }
+
+    function resolveOwnerByPortRef(portObj) {
+      for (var idx = 0; idx < portOwnerByRef.length; idx++) {
+        if (portOwnerByRef[idx].port === portObj) {
+          return portOwnerByRef[idx].deviceName;
+        }
+      }
+      return null;
+    }
+
+    // Pass 1: enumerate devices and set in_use via each port's attached link.
     for (var i = 0; i < deviceCount; i++) {
       var device = ipc.network().getDeviceAt(i);
       var deviceName = device.getName();
-
       var interfaces = [];
       var portCount = device.getPortCount();
+
       for (var j = 0; j < portCount; j++) {
         var port = device.getPortAt(j);
-        if (port) {
-          var pname = port.getName();
-          portOwner[pname] = deviceName;
-          interfaces.push({ name: pname, in_use: inUseSet[pname] === true });
+        if (!port) continue;
+
+        var pname = port.getName();
+        var link = null;
+        var hasLink = false;
+
+        rememberPortOwner(port, deviceName, pname);
+        if (!portOwnerByName[pname]) portOwnerByName[pname] = [];
+        portOwnerByName[pname].push(deviceName);
+
+        try {
+          link = port.getLink();
+          hasLink = !!link;
+        } catch (_) {
+          hasLink = false;
         }
+
+        interfaces.push({ name: pname, in_use: hasLink });
       }
 
       devices.push({
@@ -255,22 +335,70 @@ getNetwork = function () {
       });
     }
 
-    // Pass 3: connections — one map lookup per endpoint.
-    for (var k = 0; k < linkCount; k++) {
-      var lnk = ipc.network().getLinkAt(k);
-      var port1Name = lnk.getPort1().getName();
-      var port2Name = lnk.getPort2().getName();
-      var device1Name = portOwner[port1Name];
-      var device2Name = portOwner[port2Name];
-      if (device1Name && device2Name) {
-        connections.push({
-          from: device1Name,
-          fromInterface: port1Name,
-          to: device2Name,
-          toInterface: port2Name,
-          type: lnk.getConnectionType(),
-        });
+    // Pass 2: build connections from the network link table.
+    var linkCount = ipc.network().getLinkCount();
+    for (var li = 0; li < linkCount; li++) {
+      var netLink = ipc.network().getLinkAt(li);
+      if (!netLink) continue;
+
+      var p1 = null;
+      var p2 = null;
+      try {
+        p1 = netLink.getPort1();
+        p2 = netLink.getPort2();
+      } catch (_) {
+        p1 = null;
+        p2 = null;
       }
+      if (!p1 || !p2) continue;
+
+      var p1Name = p1.getName();
+      var p2Name = p2.getName();
+      var d1Name = null;
+      var d2Name = null;
+
+      try {
+        var d1 = p1.getOwnerDevice();
+        if (d1) d1Name = d1.getName();
+      } catch (_) {}
+      try {
+        var d2 = p2.getOwnerDevice();
+        if (d2) d2Name = d2.getName();
+      } catch (_) {}
+
+      // Fallback 1: object identity mapping from enumerated device ports.
+      if (!d1Name) d1Name = resolveOwnerByPortRef(p1);
+      if (!d2Name) d2Name = resolveOwnerByPortRef(p2);
+
+      // Fallback 2: port-name mapping only when globally unique.
+      if (!d1Name) {
+        var owners1 = portOwnerByName[p1Name];
+        if (owners1 && owners1.length === 1) d1Name = owners1[0];
+      }
+      if (!d2Name) {
+        var owners2 = portOwnerByName[p2Name];
+        if (owners2 && owners2.length === 1) d2Name = owners2[0];
+      }
+
+      if (!d1Name || !d2Name) continue;
+
+      var endpointA = makeEndpointKey(d1Name, p1Name);
+      var endpointB = makeEndpointKey(d2Name, p2Name);
+      var pairKey = endpointA < endpointB
+        ? endpointA + "<->" + endpointB
+        : endpointB + "<->" + endpointA;
+      if (seenConnectionSet[pairKey] === true) continue;
+      seenConnectionSet[pairKey] = true;
+
+      connections.push({
+        from: d1Name,
+        fromInterface: p1Name,
+        to: d2Name,
+        toInterface: p2Name,
+        type: typeof netLink.getConnectionType === "function"
+          ? netLink.getConnectionType()
+          : "",
+      });
     }
 
     return {
@@ -479,16 +607,36 @@ sendPdu = function (sourceDevice, destinationDevice) {
     if (!ipc.network().getDevice(destinationDevice)) {
       return { success: false, error: "Destination device not found: " + destinationDevice };
     }
+    var beforeCount = sim.getFrameInstanceCount();
     var errCode = ipc.appWindow().getUserCreatedPDU().addSimplePdu(sourceDevice, destinationDevice);
     // ADD_PDU_ERROR: 0 / falsy = success
     var errStr = String(errCode);
     if (errCode && errStr !== "0") {
       return { success: false, error: "PT rejected PDU (ADD_PDU_ERROR=" + errStr + ")" };
     }
+    var afterCount = sim.getFrameInstanceCount();
+    var frameDelta = afterCount - beforeCount;
+    // In healthy sessions addSimplePdu should immediately add frame instances.
+    // If not, surface it explicitly so callers do not trust a false-positive success.
+    if (frameDelta <= 0) {
+      return {
+        success: false,
+        error:
+          "PDU enqueue returned success, but simulation frame count did not increase. " +
+          "PT session may be unhealthy.",
+        sourceDevice: sourceDevice,
+        destinationDevice: destinationDevice,
+        frameCountBefore: beforeCount,
+        frameCountAfter: afterCount,
+      };
+    }
     return {
       success: true,
       message: "ICMP PDU added from " + sourceDevice + " to " + destinationDevice,
       simulationModeEnabled: modeEnabled,
+      frameCountBefore: beforeCount,
+      frameCountAfter: afterCount,
+      frameDelta: frameDelta,
     };
   } catch (error) {
     return fail("Error sending PDU", error);
@@ -545,7 +693,7 @@ var TRAFFIC_TYPE_NAMES = {
   "1000": "Custom", "eTrafficType_Custom": "Custom",
 };
 
-getPduResults = function (types) {
+getPduResults = function (types, sinceIndex, limit, sourceDevice, destinationDevice, statuses) {
   try {
     var sim = ipc.simulation();
     if (!sim.isSimulationMode()) {
@@ -558,9 +706,26 @@ getPduResults = function (types) {
       for (var t = 0; t < types.length; t++) typeFilter[types[t].toUpperCase()] = true;
     }
 
+    var statusFilter = null;
+    if (Array.isArray(statuses) && statuses.length > 0) {
+      statusFilter = {};
+      for (var s = 0; s < statuses.length; s++) {
+        statusFilter[String(statuses[s]).toLowerCase()] = true;
+      }
+    }
+    var srcFilter = sourceDevice ? String(sourceDevice).toLowerCase() : null;
+    var dstFilter = destinationDevice ? String(destinationDevice).toLowerCase() : null;
+    var startIndex = Number(sinceIndex);
+    if (isNaN(startIndex) || startIndex < 0) startIndex = 0;
+    var cap = Number(limit);
+    if (isNaN(cap) || cap <= 0) cap = 500;
+
     var total = sim.getFrameInstanceCount();
     var frames = [];
-    for (var i = 0; i < total; i++) {
+    var acceptedCount = 0;
+    var droppedCount = 0;
+    var newestIndex = -1;
+    for (var i = startIndex; i < total; i++) {
       var fi = sim.getFrameInstanceAt(i);
       if (!fi) continue;
 
@@ -579,17 +744,37 @@ getPduResults = function (types) {
       else if (fi.isFrameOnTransit())    status = "in_transit";
       else if (fi.isFrameSent())         status = "sent";
 
+      var src = fi.getSourceString();
+      var dst = fi.getDestinationString();
+      var srcText = String(src || "").toLowerCase();
+      var dstText = String(dst || "").toLowerCase();
+      if (srcFilter && srcText.indexOf(srcFilter) === -1) continue;
+      if (dstFilter && dstText.indexOf(dstFilter) === -1) continue;
+      if (statusFilter && !statusFilter[status]) continue;
+
+      if (status === "accepted") acceptedCount++;
+      if (status === "dropped") droppedCount++;
+      newestIndex = i;
       frames.push({
         index: i,
-        source: fi.getSourceString(),
-        destination: fi.getDestinationString(),
+        source: src,
+        destination: dst,
         trafficType: typeName,
         status: status,
       });
+      if (frames.length >= cap) break;
     }
     return {
       success: true,
-      result: { totalFrames: total, shown: frames.length, frames: frames },
+      result: {
+        totalFrames: total,
+        shown: frames.length,
+        startIndex: startIndex,
+        newestIndex: newestIndex,
+        acceptedCount: acceptedCount,
+        droppedCount: droppedCount,
+        frames: frames,
+      },
     };
   } catch (error) {
     return fail("Error getting PDU results", error);

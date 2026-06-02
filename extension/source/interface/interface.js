@@ -125,7 +125,7 @@
     renameDevice:        ["deviceName", "newName"],
     moveDevice:          ["deviceName", "x", "y"],
     setPower:            ["deviceName", "power"],
-    getPduResults:       ["types"],
+    getPduResults:       ["types", "sinceIndex", "limit", "sourceDevice", "destinationDevice", "statuses"],
     getCommandLog:       ["deviceName", "limit"],
   };
 
@@ -177,20 +177,20 @@
 
   function bindSocketEvents(socket) {
     socket.on("connect", function () {
-      setStatus("connected", "connected");
+      setStatus("connected", "已连接");
       if ($sid) $sid.textContent = socket.id;
-      logLine("connected sid=" + socket.id, "ok");
+      logLine("连接成功 sid=" + socket.id, "ok");
     });
 
     socket.on("connect_error", function (err) {
-      setStatus("offline", "offline");
-      logLine("connect_error: " + ((err && err.message) || err), "err");
+      setStatus("offline", "离线");
+      logLine("连接错误: " + ((err && err.message) || err), "err");
     });
 
     socket.on("disconnect", function (reason) {
-      setStatus("connecting", "reconnecting");
+      setStatus("connecting", "重连中");
       if ($sid) $sid.textContent = "—";
-      logLine("disconnect: " + reason, "err");
+      logLine("连接断开: " + reason, "err");
     });
 
     socket.on("tool_call", function (data) {
@@ -208,8 +208,8 @@
     });
   }
 
-  setStatus("connecting", "connecting");
-  logLine("connecting to " + MCP_URL);
+  setStatus("connecting", "连接中");
+  logLine("正在连接到 " + MCP_URL);
 
   var socket = createSocket();
   bindSocketEvents(socket);

@@ -312,7 +312,8 @@ TOOLS: list[dict] = [
             "Read the outcome of PDUs in the current simulation — "
             "source, destination, traffic type, and status (accepted/dropped/in_transit/etc). "
             "Call after stepSimulation to verify connectivity. "
-            "Use the types filter to show only ICMP, TCP, etc. and hide STP/DTP background noise."
+            "Use filters (types, statuses, sourceDevice, destinationDevice, sinceIndex, limit) "
+            "to focus on relevant frames and hide background noise."
         ),
         "inputSchema": {
             "type": "object",
@@ -323,6 +324,32 @@ TOOLS: list[dict] = [
                     "description": (
                         "Only return frames matching these traffic type names "
                         "(e.g. [\"ICMP\"], [\"ICMP\",\"ARP\"]). Omit to return all frames."
+                    ),
+                },
+                "sinceIndex": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Only include frames with index >= sinceIndex. Defaults to 0.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5000,
+                    "description": "Maximum frames to return after filtering. Defaults to 500.",
+                },
+                "sourceDevice": {
+                    "type": "string",
+                    "description": "Filter by source text containing this device name.",
+                },
+                "destinationDevice": {
+                    "type": "string",
+                    "description": "Filter by destination text containing this device name.",
+                },
+                "statuses": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Filter by frame statuses (e.g. [\"accepted\"], [\"dropped\",\"sent\"])."
                     ),
                 },
             },
